@@ -1,0 +1,46 @@
+# 日志模块配置文件
+
+[logger.default]
+# 默认日志器配置
+name = "agent_system"
+level = "INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL
+format_string = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+detailed_mode = true
+max_args_display = 5
+truncate_length = 1000
+
+[logger.development]
+# 开发环境配置
+name = "dev_logger"
+level = "DEBUG"
+format_string = "[%(levelname)s] %(asctime)s | %(name)s | %(funcName)s:%(lineno)d | %(message)s"
+detailed_mode = true
+max_args_display = 10
+truncate_length = 2000
+
+[logger.production]
+# 生产环境配置
+name = "prod_logger"
+level = "INFO"
+format_string = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+detailed_mode = false
+max_args_display = 3
+truncate_length = 500
+
+[logger.testing]
+# 测试环境配置
+name = "test_logger"
+level = "DEBUG"
+format_string = "[TEST] %(asctime)s - %(levelname)s - %(message)s"
+detailed_mode = true
+max_args_display = 8
+truncate_length = 1500
+
+[logger.performance]
+# 性能监控配置
+name = "perf_logger"
+level = "INFO"
+format_string = "[PERF] %(asctime)s | %(message)s"
+detailed_mode = false
+max_args_display = 2
+truncate_length = 300

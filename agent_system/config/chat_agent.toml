@@ -1,0 +1,19 @@
+[agent]
+type = "chat"
+name = "ChatAgent"
+description = "通用聊天助手"
+
+[llm]
+model = "gpt-3.5-turbo"
+max_tokens = 2000
+temperature = 0.8
+system_prompt = "你是一个友好的AI助手，请用中文回答用户的问题。"
+
+[features]
+enable_memory = true
+enable_context = true
+max_history = 10
+
+[validation]
+max_input_length = 1000
+required_fields = ["user_input"]
