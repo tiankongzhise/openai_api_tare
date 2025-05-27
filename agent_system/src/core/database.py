@@ -70,7 +70,7 @@ class DatabaseManager:
 
     async def compare_and_sync_schema(self, sync_db: bool = True):
         """比较ORM模型与数据库表结构，并根据需要同步。"""
-        logger.info("Comparing ORM schema with database...")
+        logger.info("开始比较ORM模式与数据库...")
         try:
             async with self.async_engine.connect() as conn:
                 # 获取数据库中所有表的名称
@@ -83,11 +83,11 @@ class DatabaseManager:
 
                 for table_name, orm_table_obj in orm_tables.items():
                     if table_name not in db_table_names:
-                        logger.warning(f"Table '{table_name}' exists in ORM but not in database.")
+                        logger.warning(f"表 '{table_name}' 存在于ORM中但不存在于数据库中")
                         mismatched_tables.add(table_name)
                         continue
                     
-                    # 比较列 (这是一个简化的比较，更完整的比较需要检查类型、约束等)
+                    # 比较列结构
                     try:
                         db_columns = await conn.run_sync(
                             lambda sync_conn: sqlalchemy_inspect(sync_conn).get_columns(table_name)
@@ -95,166 +95,38 @@ class DatabaseManager:
                         db_column_names = {col['name'] for col in db_columns}
                         orm_column_names = {col.name for col in orm_table_obj.columns}
 
-                        # 列集合不匹配的初始检查
+                        # 检查列集合是否匹配
                         if db_column_names != orm_column_names:
-                            logger.warning(f"Table '{table_name}' has column set mismatch.")
-                            logger.debug(f"DB columns: {db_column_names}, ORM columns: {orm_column_names}")
+                            logger.warning(f"表 '{table_name}' 的列集合不匹配")
+                            logger.debug(f"数据库列: {db_column_names}, ORM列: {orm_column_names}")
                             mismatched_tables.add(table_name)
-                            # 如果集合已经不同，则无需为此基本检查单独检查列
-                            # 对于更细粒度的同步，可能仍会继续添加缺失/删除多余的列
                         else:
-                            # 如果列集合相同，则继续检查各个列属性
+                            # 列集合相同时，检查各列的详细属性
                             db_columns_dict = {col['name']: col for col in db_columns}
                             for orm_col_obj in orm_table_obj.columns:
                                 orm_col_name = orm_col_obj.name
                                 db_col_info = db_columns_dict.get(orm_col_name)
 
-                                # 如果 db_column_names == orm_column_names，则不应发生这种情况，但这是一种安全措施
                                 if not db_col_info:
-                                    logger.warning(f"Column '{orm_col_name}' in ORM not found in DB for table '{table_name}', though sets matched initially.")
+                                    logger.warning(f"列 '{orm_col_name}' 在ORM中存在但在数据库表 '{table_name}' 中未找到")
                                     mismatched_tables.add(table_name)
                                     continue
 
-                                column_mismatch_details = []
-
-                                # 1. 比较类型（类名的基本字符串表示形式）
-                                # 更强大的类型比较可能涉及检查特定的类型参数（长度、精度等）
-                                # 并处理特定于方言的类型差异。
-                                orm_type_str = type(orm_col_obj.type).__name__.lower()
-                                db_type_str = type(db_col_info['type']).__name__.lower() # 来自 inspect 的类型已经是类型对象
-                                # 一种常见的方法是检查 db_type_str 是否包含 orm_type_str，反之亦然，或使用更具体的检查
-                                # 为简单起见，我们将进行基本检查。这可能需要改进。
-                                # 示例：db_type_str 可以是 'VARCHAR'，而 orm_type_str 可以是 'String'
-                                # 一个更强大的检查方法是：isinstance(db_col_info['type'], orm_col_obj.type.__class__)
-                                # 但是，精确的类型相等在不同的方言和特定的类型实例化中可能很棘手。
-                                if orm_type_str not in db_type_str and db_type_str not in orm_type_str:
-                                     # 对常见类型进行非常基本的检查，这并非详尽无遗
-                                    is_compatible = False
-                                    if (('int' in orm_type_str and 'int' in db_type_str) or \
-                                        ('char' in orm_type_str and 'char' in db_type_str) or \
-                                        ('text' in orm_type_str and 'text' in db_type_str) or \
-                                        ('date' in orm_type_str and 'date' in db_type_str) or \
-                                        ('time' in orm_type_str and 'time' in db_type_str) or \
-                                        ('bool' in orm_type_str and 'bool' in db_type_str) or \
-                                        ('num' in orm_type_str and 'num' in db_type_str) or # 数字/小数
-                                        ('float' in orm_type_str and 'float' in db_type_str) or
-                                        ('lob' in orm_type_str and 'lob' in db_type_str)): # 二进制大对象/字符大对象
-                                        is_compatible = True
-                                    
-                                    if not is_compatible:
-                                        column_mismatch_details.append(f"Type mismatch: ORM='{orm_col_obj.type}' (as {orm_type_str}), DB='{db_col_info['type']}' (as {db_type_str})")
-
-                                # 2. 比较可空性
-                                orm_nullable = bool(orm_col_obj.nullable)
-                                db_nullable = bool(db_col_info['nullable'])
-                                if orm_nullable != db_nullable:
-                                    column_mismatch_details.append(f"Nullable mismatch: ORM={orm_nullable}, DB={db_nullable}")
-
-                                # 3. 比较默认值（基本字符串比较，可能很复杂）
-                                orm_default_val = None
-                                if orm_col_obj.default:
-                                    if hasattr(orm_col_obj.default, 'arg'): # 如果有 'arg' 属性
-                                        orm_default_val = str(orm_col_obj.default.arg)
-                                    else: # 对于可能是文本的 server_default
-                                        orm_default_val = str(orm_col_obj.default)
-                                elif orm_col_obj.server_default:
-                                     orm_default_val = str(orm_col_obj.server_default.arg) if hasattr(orm_col_obj.server_default, 'arg') else str(orm_col_obj.server_default) # 如果有 'arg' 属性则取 'arg'，否则取本身
-                                
-                                db_default_val = str(db_col_info['default']) if db_col_info['default'] is not None else None
-
-                                # 标准化常见的默认值表示以进行比较，例如 'None' 与 None
-                                if orm_default_val == 'None': orm_default_val = None
-                                if db_default_val == 'None': db_default_val = None
-                                
-                                # 这种比较非常基本。数据库默认值可能很复杂（例如，像 NOW() 这样的函数）。
-                                # 此外，SQLAlchemy 的 `default` 是客户端的，`server_default` 是 DDL（数据定义语言）。
-                                if orm_default_val != db_default_val:
-                                    # 一种常见情况：ORM 没有默认值 (None)，数据库具有服务器默认值（例如 'NULL::character varying'）
-                                    # 根据严格程度，这可能是可接受的，也可能不是。
-                                    # 目前，如果在基本标准化后它们不相等，我们将标记它。
-                                    if not (orm_default_val is None and db_default_val and 'NULL' in db_default_val.upper()): # 尝试更智能地处理 NULL 值
-                                        column_mismatch_details.append(f"Default mismatch: ORM='{orm_default_val}', DB='{db_default_val}'")
-                                
-                                # 4. 比较是否为主键的一部分 (简单比较，不处理组合主键顺序) 
-                                orm_is_pk = bool(orm_col_obj.primary_key)
-                                db_is_pk = bool(db_col_info.get('primary_key', False)) # get_columns 通常不直接标记主键，需要从 get_pk_constraint 获取
-                                # 更准确的主键比较应在表级别进行，这里仅为示例性列级检查
-                                # if orm_is_pk != db_is_pk: # 这种比较方式不准确，主键是表级约束
-                                #    column_mismatch_details.append(f"Primary key part mismatch: ORM={orm_is_pk}, DB={db_is_pk}")
-
-                                # 5. 比较列级唯一约束 (简单比较，不处理表级唯一约束)
-                                orm_is_unique = bool(orm_col_obj.unique)
-                                # db_is_unique = bool(db_col_info.get('unique', False)) # get_columns 通常不直接标记唯一，需要从 get_unique_constraints 获取
-                                # 更准确的唯一约束比较应在表级别进行
-                                # if orm_is_unique != db_is_unique: # 这种比较方式不准确
-                                #    column_mismatch_details.append(f"Unique constraint mismatch: ORM={orm_is_unique}, DB={db_is_unique}")
+                                # 检查列属性差异
+                                column_mismatch_details = self._compare_column_attributes(
+                                    orm_col_obj, db_col_info
+                                )
 
                                 if column_mismatch_details:
-                                    logger.warning(f"Table '{table_name}', Column '{orm_col_name}': Mismatches found - {'; '.join(column_mismatch_details)}")
+                                    logger.warning(f"表 '{table_name}', 列 '{orm_col_name}': 发现不匹配 - {'; '.join(column_mismatch_details)}")
                                     mismatched_tables.add(table_name)
 
                     except Exception as e_inspect_cols:
-                        logger.error(f"Error inspecting columns for table {table_name}: {e_inspect_cols}")
+                        logger.error(f"检查表 {table_name} 的列时出错: {e_inspect_cols}")
                         mismatched_tables.add(table_name)
 
                     # 表级别约束比较
-                    # 比较主键
-                    try:
-                        db_pk_constraint = await conn.run_sync(
-                            lambda sync_conn: sqlalchemy_inspect(sync_conn).get_pk_constraint(table_name)
-                        )
-                        orm_pk_columns = {col.name for col in orm_table_obj.primary_key.columns}
-                        db_pk_columns = set(db_pk_constraint.get('constrained_columns', []))
-                        if orm_pk_columns != db_pk_columns:
-                            logger.warning(f"Table '{table_name}': Primary key mismatch. ORM: {orm_pk_columns}, DB: {db_pk_columns}")
-                            mismatched_tables.add(table_name)
-                    except Exception as e_pk:
-                        logger.error(f"Error comparing primary key for table {table_name}: {e_pk}")
-                        mismatched_tables.add(table_name)
-
-                    # 比较唯一约束
-                    try:
-                        db_unique_constraints = await conn.run_sync(
-                            lambda sync_conn: sqlalchemy_inspect(sync_conn).get_unique_constraints(table_name)
-                        )
-                        orm_unique_constraints = set()
-                        for constraint in orm_table_obj.constraints:
-                            if isinstance(constraint, sqlalchemy.UniqueConstraint):
-                                orm_unique_constraints.add(tuple(sorted(col.name for col in constraint.columns)))
-                        
-                        db_unique_constraints_set = set()
-                        for const in db_unique_constraints:
-                            db_unique_constraints_set.add(tuple(sorted(const['column_names'])))
-
-                        if orm_unique_constraints != db_unique_constraints_set:
-                            logger.warning(f"Table '{table_name}': Unique constraints mismatch. ORM: {orm_unique_constraints}, DB: {db_unique_constraints_set}")
-                            mismatched_tables.add(table_name)
-                    except Exception as e_uq:
-                        logger.error(f"Error comparing unique constraints for table {table_name}: {e_uq}")
-                        mismatched_tables.add(table_name)
-
-                    # 比较索引
-                    try:
-                        db_indexes = await conn.run_sync(
-                            lambda sync_conn: sqlalchemy_inspect(sync_conn).get_indexes(table_name)
-                        )
-                        orm_indexes_set = set()
-                        for index in orm_table_obj.indexes:
-                            orm_indexes_set.add(tuple(sorted(col.name for col in index.columns)))
-                            # 更多比较可以加入: index.unique, index.dialect_options etc.
-
-                        db_indexes_info_set = set()
-                        for idx in db_indexes:
-                            db_indexes_info_set.add(tuple(sorted(idx['column_names'])))
-                            # 更多比较可以加入: idx['unique']
-
-                        # 注意：这里的比较仅比较索引的列，更复杂的比较可能需要检查索引类型、唯一性等
-                        if orm_indexes_set != db_indexes_info_set:
-                            logger.warning(f"Table '{table_name}': Indexes mismatch (column sets). ORM: {orm_indexes_set}, DB: {db_indexes_info_set}")
-                            mismatched_tables.add(table_name)
-                    except Exception as e_idx:
-                        logger.error(f"Error comparing indexes for table {table_name}: {e_idx}")
-                        mismatched_tables.add(table_name)
+                    await self._compare_table_constraints(conn, table_name, orm_table_obj, mismatched_tables)
 
                 # mismatched_tables 现在是一个集合
                 if mismatched_tables:
@@ -312,7 +184,7 @@ class DatabaseManager:
                                             # Adding default values via ALTER is database-specific and complex here.
                                             # For simplicity, we'll skip adding defaults in this ALTER statement.
                                             # Consider `server_default` if it's critical.
-                                            await conn_sync.execute(sqlalchemy.text(alter_sql))
+                                            await conn_sync.execute(text(alter_sql))
                                             logger.info(f"Added column '{orm_col.name}' to table '{table_name}'.")
                                         except Exception as e_add_col:
                                             logger.error(f"Failed to add column '{orm_col.name}' to table '{table_name}': {e_add_col}")
@@ -370,7 +242,7 @@ class DatabaseManager:
                                                 if using_clause:
                                                     alter_type_sql += using_clause
                                                 
-                                                await conn_sync.execute(sqlalchemy.text(alter_type_sql))
+                                                await conn_sync.execute(text(alter_type_sql))
                                                 logger.info(f"Table '{table_name}', Column '{orm_col.name}': Successfully altered type to '{orm_col_type_compiled}'.")
                                             except Exception as e_alter_type:
                                                 logger.error(f"Table '{table_name}', Column '{orm_col.name}': Failed to alter type from '{db_col_type_compiled}' to '{orm_col_type_compiled}': {e_alter_type}. SQL: {alter_type_sql}")
@@ -382,7 +254,7 @@ class DatabaseManager:
                                             logger.info(f"Table '{table_name}', Column '{orm_col.name}': Nullable mismatch. ORM: {orm_nullable}, DB: {db_nullable}. Attempting ALTER.")
                                             try:
                                                 alter_nullable_sql = f"ALTER TABLE {table_name} ALTER COLUMN {orm_col.name} {'DROP NOT NULL' if orm_nullable else 'SET NOT NULL'}"
-                                                await conn_sync.execute(sqlalchemy.text(alter_nullable_sql))
+                                                await conn_sync.execute(text(alter_nullable_sql))
                                                 logger.info(f"Table '{table_name}', Column '{orm_col.name}': Successfully altered NULLABLE to {orm_nullable}.")
                                             except Exception as e_alter_nullable:
                                                 logger.error(f"Table '{table_name}', Column '{orm_col.name}': Failed to alter NULLABLE constraint: {e_alter_nullable}")
@@ -422,6 +294,115 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"Error during schema comparison/sync: {e}", exc_info=True)
             return False
+    
+    async def _compare_column_attributes(self, conn, table_name: str, orm_column, db_column_dict: dict, mismatched_tables: set):
+        """比较ORM列与数据库列的属性"""
+        column_name = orm_column.name
+        
+        if column_name not in db_column_dict:
+            logger.warning(f"表 '{table_name}': 缺失列 '{column_name}'")
+            mismatched_tables.add(table_name)
+            return
+        
+        db_column = db_column_dict[column_name]
+        
+        # 比较列类型
+        orm_type_str = str(orm_column.type).upper()
+        db_type_str = str(db_column['type']).upper()
+        
+        if not self._are_types_compatible(orm_type_str, db_type_str):
+            logger.warning(f"表 '{table_name}', 列 '{column_name}': 类型不匹配. ORM: {orm_type_str}, DB: {db_type_str}")
+            mismatched_tables.add(table_name)
+        
+        # 比较可空性
+        if orm_column.nullable != db_column['nullable']:
+            logger.warning(f"表 '{table_name}', 列 '{column_name}': 可空性不匹配. ORM: {orm_column.nullable}, DB: {db_column['nullable']}")
+            mismatched_tables.add(table_name)
+        
+        # 比较默认值（简化比较）
+        orm_default = getattr(orm_column.default, 'arg', None) if orm_column.default else None
+        db_default = db_column.get('default')
+        if str(orm_default) != str(db_default):
+            logger.warning(f"表 '{table_name}', 列 '{column_name}': 默认值不匹配. ORM: {orm_default}, DB: {db_default}")
+            mismatched_tables.add(table_name)
+    
+    def _are_types_compatible(self, orm_type: str, db_type: str) -> bool:
+        """检查ORM类型和数据库类型是否兼容"""
+        if orm_type == db_type:
+            return True
+        
+        # 类型映射表
+        type_mappings = {
+            'INTEGER': ['INT', 'INT4', 'SERIAL'],
+            'VARCHAR': ['TEXT', 'CHARACTER VARYING', 'CHAR'],
+            'BOOLEAN': ['BOOL'],
+            'TIMESTAMP': ['DATETIME'],
+            'FLOAT': ['REAL', 'DOUBLE PRECISION'],
+            'TEXT': ['VARCHAR', 'CHARACTER VARYING']
+        }
+        
+        for orm_base_type, db_equivalents in type_mappings.items():
+            if orm_base_type in orm_type:
+                return any(db_equiv in db_type for db_equiv in db_equivalents)
+        
+        return False
+    
+    async def _compare_table_constraints(self, conn, table_name: str, orm_table_obj, mismatched_tables: set):
+        """比较表级别约束（主键、唯一约束、索引）"""
+        try:
+            # 比较主键
+            db_pk_constraint = await conn.run_sync(
+                lambda sync_conn: sqlalchemy_inspect(sync_conn).get_pk_constraint(table_name)
+            )
+            orm_pk_columns = {col.name for col in orm_table_obj.primary_key.columns}
+            db_pk_columns = set(db_pk_constraint.get('constrained_columns', []))
+            if orm_pk_columns != db_pk_columns:
+                logger.warning(f"表 '{table_name}': 主键不匹配. ORM: {orm_pk_columns}, DB: {db_pk_columns}")
+                mismatched_tables.add(table_name)
+        except Exception as e:
+            logger.error(f"比较表 {table_name} 主键时出错: {e}")
+            mismatched_tables.add(table_name)
+        
+        try:
+            # 比较唯一约束
+            db_unique_constraints = await conn.run_sync(
+                lambda sync_conn: sqlalchemy_inspect(sync_conn).get_unique_constraints(table_name)
+            )
+            orm_unique_constraints = set()
+            for constraint in orm_table_obj.constraints:
+                if isinstance(constraint, sqlalchemy.UniqueConstraint):
+                    orm_unique_constraints.add(tuple(sorted(col.name for col in constraint.columns)))
+            
+            db_unique_constraints_set = set()
+            for const in db_unique_constraints:
+                db_unique_constraints_set.add(tuple(sorted(const['column_names'])))
+
+            if orm_unique_constraints != db_unique_constraints_set:
+                logger.warning(f"表 '{table_name}': 唯一约束不匹配. ORM: {orm_unique_constraints}, DB: {db_unique_constraints_set}")
+                mismatched_tables.add(table_name)
+        except Exception as e:
+            logger.error(f"比较表 {table_name} 唯一约束时出错: {e}")
+            mismatched_tables.add(table_name)
+        
+        try:
+            # 比较索引
+            db_indexes = await conn.run_sync(
+                lambda sync_conn: sqlalchemy_inspect(sync_conn).get_indexes(table_name)
+            )
+            orm_indexes_set = set()
+            for index in orm_table_obj.indexes:
+                orm_indexes_set.add(tuple(sorted(col.name for col in index.columns)))
+
+            db_indexes_info_set = set()
+            for idx in db_indexes:
+                db_indexes_info_set.add(tuple(sorted(idx['column_names'])))
+
+            if orm_indexes_set != db_indexes_info_set:
+                logger.warning(f"表 '{table_name}': 索引不匹配. ORM: {orm_indexes_set}, DB: {db_indexes_info_set}")
+                mismatched_tables.add(table_name)
+        except Exception as e:
+            logger.error(f"比较表 {table_name} 索引时出错: {e}")
+            mismatched_tables.add(table_name)
 
     async def get_unique_constraints(self, table_name: str) -> List[Tuple[str, ...]]:
         """查找表的全部唯一索引组 (包括主键和唯一约束)。"""
