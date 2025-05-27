@@ -36,7 +36,7 @@ class AnalysisAgent(BaseAgent):
                 pass
         
         # 保存对话
-        self.save_conversation(
+        await self.save_conversation(
             f"数据分析请求: {analysis_request.analysis_type}",
             response_content
         )

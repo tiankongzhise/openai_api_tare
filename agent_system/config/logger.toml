@@ -44,3 +44,12 @@ format_string = "[PERF] %(asctime)s | %(message)s"
 detailed_mode = false
 max_args_display = 2
 truncate_length = 300
+
+[logger.db_errors]
+# 数据库错误日志配置
+name = "db_error_logger"
+level = "ERROR"
+format_string = "[DB_ERROR] %(asctime)s - %(message)s"
+detailed_mode = false
+max_args_display = 1
+truncate_length = 200

@@ -2,7 +2,8 @@ from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 from src.core.config import Config, ConfigManager
 from src.core.llm_client import LLMClient, Message
-from src.core.database import DatabaseManager
+from src.core.database import DatabaseManager, init_db # init_db might be used at a higher level e.g. application startup
+import os # Added for getenv in LLMClient init
 from src.models.schemas import UserInput, AgentResponse
 import uuid
 
@@ -17,8 +18,11 @@ class BaseAgent(ABC):
             base_url=os.getenv("OPENAI_BASE_URL")
         )
         
-        # 初始化数据库
+        # 初始化数据库管理器实例 (同步操作，内部处理异步引擎设置)
         self.db_manager = DatabaseManager(self.config_manager.database_url)
+        # 异步数据库表创建应在应用启动时完成，例如:
+        # asyncio.run(self.db_manager.create_db_and_tables()) 
+        # 或者通过一个全局的初始化函数调用 init_db
         
         # Agent状态
         self.session_id = str(uuid.uuid4())
@@ -70,10 +74,10 @@ class BaseAgent(ABC):
         )
         return response.content
     
-    def save_conversation(self, user_input: str, agent_response: str):
-        """保存对话到数据库"""
+    async def save_conversation(self, user_input: str, agent_response: str):
+        """异步保存对话到数据库"""
         if self.config.features.enable_memory:
-            self.db_manager.save_conversation(
+            await self.db_manager.save_conversation(
                 agent_type=self.config.agent.type,
                 user_input=user_input,
                 agent_response=agent_response,

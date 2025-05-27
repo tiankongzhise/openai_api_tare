@@ -17,15 +17,16 @@ class ChatAgent(BaseAgent):
         
         # 如果启用上下文，添加最近的对话历史
         if self.config.features.enable_context:
-            recent_history = self.db_manager.get_conversation_history(
+            recent_history = await self.db_manager.get_conversation_history(
                 agent_type=self.config.agent.type,
                 session_id=self.session_id,
                 limit=3
             )
             
-            for conv in reversed(recent_history):
-                messages.insert(-1, Message(role="user", content=conv.user_input))
-                messages.insert(-1, Message(role="assistant", content=conv.agent_response))
+            if recent_history: # Ensure recent_history is not None or empty
+                for conv in reversed(recent_history):
+                    messages.insert(-1, Message(role="user", content=conv.user_input))
+                    messages.insert(-1, Message(role="assistant", content=conv.agent_response))
         
         # 调用LLM
         response_content = await self.call_llm(messages)
@@ -34,7 +35,7 @@ class ChatAgent(BaseAgent):
         self.add_to_history("assistant", response_content)
         
         # 保存对话
-        self.save_conversation(chat_request.content, response_content)
+        await self.save_conversation(chat_request.content, response_content)
         
         return AgentResponse(
             content=response_content,
