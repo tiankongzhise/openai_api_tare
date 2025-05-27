@@ -78,12 +78,12 @@ class DatabaseManager:
                 )
 
                 orm_tables = Base.metadata.tables
-                mismatched_tables = []
+                mismatched_tables = set()
 
                 for table_name, orm_table_obj in orm_tables.items():
                     if table_name not in db_table_names:
                         logger.warning(f"Table '{table_name}' exists in ORM but not in database.")
-                        mismatched_tables.append(table_name)
+                        mismatched_tables.add(table_name)
                         continue
                     
                     # 比较列 (这是一个简化的比较，更完整的比较需要检查类型、约束等)
@@ -98,8 +98,7 @@ class DatabaseManager:
                         if db_column_names != orm_column_names:
                             logger.warning(f"Table '{table_name}' has column set mismatch.")
                             logger.debug(f"DB columns: {db_column_names}, ORM columns: {orm_column_names}")
-                            if table_name not in mismatched_tables:
-                                mismatched_tables.append(table_name)
+                            mismatched_tables.add(table_name)
                             # 如果集合已经不同，则无需为此基本检查单独检查列
                             # 对于更细粒度的同步，可能仍会继续添加缺失/删除多余的列
                         else:
@@ -112,8 +111,7 @@ class DatabaseManager:
                                 # 如果 db_column_names == orm_column_names，则不应发生这种情况，但这是一种安全措施
                                 if not db_col_info:
                                     logger.warning(f"Column '{orm_col_name}' in ORM not found in DB for table '{table_name}', though sets matched initially.")
-                                    if table_name not in mismatched_tables:
-                                        mismatched_tables.append(table_name)
+                                    mismatched_tables.add(table_name)
                                     continue
 
                                 column_mismatch_details = []
@@ -121,8 +119,8 @@ class DatabaseManager:
                                 # 1. 比较类型（类名的基本字符串表示形式）
                                 # 更强大的类型比较可能涉及检查特定的类型参数（长度、精度等）
                                 # 并处理特定于方言的类型差异。
-                                orm_type_str = str(orm_col_obj.type.__class__.__name__).lower()
-                                db_type_str = str(db_col_info['type']).__class__.__name__.lower() # 来自 inspect 的类型已经是类型对象
+                                orm_type_str = type(orm_col_obj.type).__name__.lower()
+                                db_type_str = type(db_col_info['type']).__name__.lower() # 来自 inspect 的类型已经是类型对象
                                 # 一种常见的方法是检查 db_type_str 是否包含 orm_type_str，反之亦然，或使用更具体的检查
                                 # 为简单起见，我们将进行基本检查。这可能需要改进。
                                 # 示例：db_type_str 可以是 'VARCHAR'，而 orm_type_str 可以是 'String'
@@ -192,13 +190,11 @@ class DatabaseManager:
 
                                 if column_mismatch_details:
                                     logger.warning(f"Table '{table_name}', Column '{orm_col_name}': Mismatches found - {'; '.join(column_mismatch_details)}")
-                                    if table_name not in mismatched_tables:
-                                        mismatched_tables.append(table_name)
+                                    mismatched_tables.add(table_name)
 
                     except Exception as e_inspect_cols:
                         logger.error(f"Error inspecting columns for table {table_name}: {e_inspect_cols}")
-                        if table_name not in mismatched_tables:
-                            mismatched_tables.append(table_name)
+                        mismatched_tables.add(table_name)
 
                     # 表级别约束比较
                     # 比较主键
@@ -210,12 +206,10 @@ class DatabaseManager:
                         db_pk_columns = set(db_pk_constraint.get('constrained_columns', []))
                         if orm_pk_columns != db_pk_columns:
                             logger.warning(f"Table '{table_name}': Primary key mismatch. ORM: {orm_pk_columns}, DB: {db_pk_columns}")
-                            if table_name not in mismatched_tables:
-                                mismatched_tables.append(table_name)
+                            mismatched_tables.add(table_name)
                     except Exception as e_pk:
                         logger.error(f"Error comparing primary key for table {table_name}: {e_pk}")
-                        if table_name not in mismatched_tables:
-                            mismatched_tables.append(table_name)
+                        mismatched_tables.add(table_name)
 
                     # 比较唯一约束
                     try:
@@ -233,12 +227,10 @@ class DatabaseManager:
 
                         if orm_unique_constraints != db_unique_constraints_set:
                             logger.warning(f"Table '{table_name}': Unique constraints mismatch. ORM: {orm_unique_constraints}, DB: {db_unique_constraints_set}")
-                            if table_name not in mismatched_tables:
-                                mismatched_tables.append(table_name)
+                            mismatched_tables.add(table_name)
                     except Exception as e_uq:
                         logger.error(f"Error comparing unique constraints for table {table_name}: {e_uq}")
-                        if table_name not in mismatched_tables:
-                            mismatched_tables.append(table_name)
+                        mismatched_tables.add(table_name)
 
                     # 比较索引
                     try:
@@ -258,15 +250,12 @@ class DatabaseManager:
                         # 注意：这里的比较仅比较索引的列，更复杂的比较可能需要检查索引类型、唯一性等
                         if orm_indexes_set != db_indexes_info_set:
                             logger.warning(f"Table '{table_name}': Indexes mismatch (column sets). ORM: {orm_indexes_set}, DB: {db_indexes_info_set}")
-                            if table_name not in mismatched_tables:
-                                mismatched_tables.append(table_name)
+                            mismatched_tables.add(table_name)
                     except Exception as e_idx:
                         logger.error(f"Error comparing indexes for table {table_name}: {e_idx}")
-                        if table_name not in mismatched_tables:
-                            mismatched_tables.append(table_name)
+                        mismatched_tables.add(table_name)
 
-                # 从 set 转换回 list，以便后续日志记录
-                mismatched_tables_list = list(mismatched_tables) if isinstance(mismatched_tables, set) else mismatched_tables
+                # mismatched_tables 现在是一个集合，如果后续需要列表形式，可以在使用时转换，例如 list(mismatched_tables)
                 if mismatched_tables_list:
                     logger.warning(f"Schema mismatch detected for tables: {mismatched_tables}")
                     if sync_db:
