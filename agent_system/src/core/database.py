@@ -316,8 +316,78 @@ class DatabaseManager:
                                             logger.info(f"Added column '{orm_col.name}' to table '{table_name}'.")
                                         except Exception as e_add_col:
                                             logger.error(f"Failed to add column '{orm_col.name}' to table '{table_name}': {e_add_col}")
+                                    else:
+                                        # Column exists, check for attribute mismatches to alter
+                                        # Re-fetch the specific DB column info for detailed comparison if needed, or use from current_db_columns_info
+                                        db_col_info_for_alter = next((c for c in current_db_columns_info if c['name'] == orm_col.name), None)
+                                        if not db_col_info_for_alter: continue # Should not happen
+
+                                        # B.1. Alter Column Type if mismatched
+                                        orm_col_type_compiled = orm_col.type.compile(conn_sync.dialect)
+                                        # db_col_info_for_alter['type'] is already a SQLAlchemy type object from inspect
+                                        db_col_type_compiled = db_col_info_for_alter['type'].compile(conn_sync.dialect)
+
+                                        _orm_type_class_name = type(orm_col.type).__name__.lower()
+                                        _db_type_class_name = type(db_col_info_for_alter['type']).__name__.lower()
+                                        
+                                        is_compatible_for_alter = False
+                                        # This compatibility check should mirror the one in the comparison phase
+                                        if ((_orm_type_class_name == _db_type_class_name) or \
+                                            ('int' in _orm_type_class_name and 'int' in _db_type_class_name) or \
+                                            ('char' in _orm_type_class_name and 'char' in _db_type_class_name) or \
+                                            ('text' in _orm_type_class_name and 'text' in _db_type_class_name) or \
+                                            ('date' in _orm_type_class_name and 'date' in _db_type_class_name) or \
+                                            ('time' in _orm_type_class_name and 'time' in _db_type_class_name) or \
+                                            ('bool' in _orm_type_class_name and 'bool' in _db_type_class_name) or \
+                                            ('num' in _orm_type_class_name and 'num' in _db_type_class_name) or \
+                                            ('float' in _orm_type_class_name and 'float' in _db_type_class_name) or \
+                                            ('lob' in _orm_type_class_name and 'lob' in _db_type_class_name)):
+                                            is_compatible_for_alter = True
+
+                                        if not is_compatible_for_alter and orm_col_type_compiled.lower() != db_col_type_compiled.lower():
+                                            logger.info(f"Table '{table_name}', Column '{orm_col.name}': Type mismatch. ORM: '{orm_col_type_compiled}' (class: {_orm_type_class_name}), DB: '{db_col_type_compiled}' (class: {_db_type_class_name}). Attempting ALTER.")
+                                            try:
+                                                alter_type_sql = f"ALTER TABLE {table_name} ALTER COLUMN {orm_col.name} TYPE {orm_col_type_compiled}"
+                                                using_clause = ""
+                                                if conn_sync.dialect.name == 'postgresql':
+                                                    # Heuristic for common PostgreSQL type conversions that require USING
+                                                    db_type_is_textual = isinstance(db_col_info_for_alter['type'], (sqlalchemy.types.String, sqlalchemy.types.Text, sqlalchemy.types.Unicode, sqlalchemy.types.UnicodeText))
+                                                    orm_type = orm_col.type
+                                                    if db_type_is_textual:
+                                                        if isinstance(orm_type, (sqlalchemy.types.Integer, sqlalchemy.types.BigInteger)):
+                                                            using_clause = f" USING {orm_col.name}::INTEGER"
+                                                        elif isinstance(orm_type, sqlalchemy.types.Numeric):
+                                                            using_clause = f" USING {orm_col.name}::NUMERIC"
+                                                        elif isinstance(orm_type, sqlalchemy.types.Boolean):
+                                                            using_clause = f" USING {orm_col.name}::BOOLEAN"
+                                                        elif isinstance(orm_type, sqlalchemy.types.Date):
+                                                            using_clause = f" USING {orm_col.name}::DATE"
+                                                        elif isinstance(orm_type, sqlalchemy.types.DateTime):
+                                                            using_clause = f" USING {orm_col.name}::{'TIMESTAMP WITH TIME ZONE' if getattr(orm_type, 'timezone', False) else 'TIMESTAMP'}"
+                                                        elif isinstance(orm_type, sqlalchemy.types.JSON):
+                                                            using_clause = f" USING {orm_col.name}::JSONB" # or ::JSON depending on preference
+                                                
+                                                if using_clause:
+                                                    alter_type_sql += using_clause
+                                                
+                                                await conn_sync.execute(sqlalchemy.text(alter_type_sql))
+                                                logger.info(f"Table '{table_name}', Column '{orm_col.name}': Successfully altered type to '{orm_col_type_compiled}'.")
+                                            except Exception as e_alter_type:
+                                                logger.error(f"Table '{table_name}', Column '{orm_col.name}': Failed to alter type from '{db_col_type_compiled}' to '{orm_col_type_compiled}': {e_alter_type}. SQL: {alter_type_sql}")
+
+                                        # B.2. Alter Nullable Constraint if mismatched
+                                        orm_nullable = bool(orm_col.nullable)
+                                        db_nullable = bool(db_col_info_for_alter['nullable'])
+                                        if orm_nullable != db_nullable:
+                                            logger.info(f"Table '{table_name}', Column '{orm_col.name}': Nullable mismatch. ORM: {orm_nullable}, DB: {db_nullable}. Attempting ALTER.")
+                                            try:
+                                                alter_nullable_sql = f"ALTER TABLE {table_name} ALTER COLUMN {orm_col.name} {'DROP NOT NULL' if orm_nullable else 'SET NOT NULL'}"
+                                                await conn_sync.execute(sqlalchemy.text(alter_nullable_sql))
+                                                logger.info(f"Table '{table_name}', Column '{orm_col.name}': Successfully altered NULLABLE to {orm_nullable}.")
+                                            except Exception as e_alter_nullable:
+                                                logger.error(f"Table '{table_name}', Column '{orm_col.name}': Failed to alter NULLABLE constraint: {e_alter_nullable}")
                                 
-                                # B. Add missing unique constraints
+                                # C. Add missing unique constraints
                                 for constraint in orm_table_obj.constraints:
                                     if isinstance(constraint, sqlalchemy.UniqueConstraint):
                                         orm_uc_tuple = tuple(sorted(c.name for c in constraint.columns))
