@@ -1,5 +1,6 @@
 from sqlalchemy import Column, Integer, String, Text, DateTime, create_engine as create_sync_engine, select, inspect as sqlalchemy_inspect, text
 from sqlalchemy.schema import CreateTable
+import sqlalchemy.schema # For AddConstraint, CreateIndex
 from typing import List, Dict, Any, Type, Tuple
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, declarative_base
@@ -255,18 +256,98 @@ class DatabaseManager:
                         logger.error(f"Error comparing indexes for table {table_name}: {e_idx}")
                         mismatched_tables.add(table_name)
 
-                # mismatched_tables 现在是一个集合，如果后续需要列表形式，可以在使用时转换，例如 list(mismatched_tables)
-                if mismatched_tables_list:
-                    logger.warning(f"Schema mismatch detected for tables: {mismatched_tables}")
+                # mismatched_tables 现在是一个集合
+                if mismatched_tables:
+                    logger.warning(f"Schema mismatch detected for tables: {list(mismatched_tables)}")
                     if sync_db:
-                        logger.info(f"Attempting to sync schema by applying ORM definitions (create missing tables/columns)...")
-                        async with self.async_engine.begin() as conn_sync:
-                            await conn_sync.run_sync(Base.metadata.create_all)
-                        logger.info("Schema sync attempt finished. Review database for actual changes.")
+                        logger.info(f"Attempting to sync schema by creating missing tables and altering existing ones...")
+                        async with self.async_engine.begin() as conn_sync: # Outer transaction for create_all
+                            # 1. Create entirely new tables defined in ORM but not in DB
+                            logger.info("Step 1: Running Base.metadata.create_all to create missing tables.")
+                            await conn_sync.run_sync(Base.metadata.create_all) 
+                            logger.info("Step 1: Finished Base.metadata.create_all.")
+
+                            # 2. For tables that exist but have mismatches, attempt to alter them
+                            logger.info("Step 2: Attempting to alter existing tables with detected mismatches.")
+                            for table_name in mismatched_tables: # Iterate over tables identified with issues
+                                if table_name not in orm_tables: # Should not happen if mismatched_tables is populated correctly
+                                    continue
+                                orm_table_obj = orm_tables[table_name]
+                                
+                                # Re-fetch DB state for this specific table to be absolutely sure before altering
+                                try:
+                                    current_db_columns_info = await conn_sync.run_sync(
+                                        lambda s_conn: sqlalchemy_inspect(s_conn).get_columns(table_name)
+                                    )
+                                    current_db_column_names = {c['name'] for c in current_db_columns_info}
+                                    
+                                    current_db_unique_constraints = await conn_sync.run_sync(
+                                        lambda s_conn: sqlalchemy_inspect(s_conn).get_unique_constraints(table_name)
+                                    )
+                                    current_db_unique_constraints_set = {tuple(sorted(c['column_names'])) for c in current_db_unique_constraints}
+                                    
+                                    current_db_indexes = await conn_sync.run_sync(
+                                        lambda s_conn: sqlalchemy_inspect(s_conn).get_indexes(table_name)
+                                    )
+                                    current_db_indexes_set = {tuple(sorted(idx['column_names'])) for idx in current_db_indexes}
+
+                                except Exception as e_refetch:
+                                    logger.error(f"Could not re-fetch schema for table {table_name} before alter: {e_refetch}. Skipping alterations for this table.")
+                                    continue
+
+                                # A. Add missing columns
+                                for orm_col in orm_table_obj.columns:
+                                    if orm_col.name not in current_db_column_names:
+                                        try:
+                                            # Note: This is a simplified ADD COLUMN. For full fidelity (defaults, constraints on column),
+                                            # compiling the column object itself might be better, but more complex.
+                                            # SQLAlchemy's DDL constructs are generally preferred over raw SQL.
+                                            # However, a direct AddColumn DDL construct for a specific column isn't straightforward
+                                            # without recompiling parts of the table. We'll use text for now for simplicity.
+                                            # A more robust solution would use Alembic or deeper SQLAlchemy DDL compilation.
+                                            col_type = orm_col.type.compile(self.async_engine.dialect)
+                                            alter_sql = f"ALTER TABLE {table_name} ADD COLUMN {orm_col.name} {col_type}"
+                                            if not orm_col.nullable:
+                                                alter_sql += " NOT NULL"
+                                            # Adding default values via ALTER is database-specific and complex here.
+                                            # For simplicity, we'll skip adding defaults in this ALTER statement.
+                                            # Consider `server_default` if it's critical.
+                                            await conn_sync.execute(sqlalchemy.text(alter_sql))
+                                            logger.info(f"Added column '{orm_col.name}' to table '{table_name}'.")
+                                        except Exception as e_add_col:
+                                            logger.error(f"Failed to add column '{orm_col.name}' to table '{table_name}': {e_add_col}")
+                                
+                                # B. Add missing unique constraints
+                                for constraint in orm_table_obj.constraints:
+                                    if isinstance(constraint, sqlalchemy.UniqueConstraint):
+                                        orm_uc_tuple = tuple(sorted(c.name for c in constraint.columns))
+                                        if orm_uc_tuple not in current_db_unique_constraints_set:
+                                            try:
+                                                await conn_sync.execute(sqlalchemy.schema.AddConstraint(constraint))
+                                                logger.info(f"Added unique constraint '{constraint.name}' on {orm_uc_tuple} to table '{table_name}'.")
+                                            except Exception as e_add_uq:
+                                                logger.error(f"Failed to add unique constraint '{constraint.name}' to table '{table_name}': {e_add_uq}")
+
+                                # C. Add missing indexes
+                                for index in orm_table_obj.indexes:
+                                    orm_idx_tuple = tuple(sorted(c.name for c in index.columns))
+                                    # Check if an index with the same columns already exists
+                                    # This simple check doesn't consider index name or if it's unique from ORM vs DB.
+                                    if orm_idx_tuple not in current_db_indexes_set:
+                                        try:
+                                            # Ensure the index is bound to the table if not already
+                                            if index.table is None:
+                                                index._set_parent(orm_table_obj) # Internal, but often necessary for CreateIndex
+                                            await conn_sync.execute(sqlalchemy.schema.CreateIndex(index))
+                                            logger.info(f"Added index '{index.name}' on {orm_idx_tuple} to table '{table_name}'.")
+                                        except Exception as e_add_idx:
+                                            logger.error(f"Failed to add index '{index.name}' to table '{table_name}': {e_add_idx}")
+                        
+                        logger.info("Schema sync attempt finished. Review database for actual changes and potential errors.")
                     else:
-                        logger.info("Schema sync is disabled. Manual intervention may be required.")
+                        logger.info("Schema sync is disabled. Manual intervention may be required for mismatched tables.")
                 else:
-                    logger.info("ORM schema and database schema appear to be consistent (basic check).")
+                    logger.info("ORM schema and database schema appear to be consistent (based on checks performed).")
                 return not bool(mismatched_tables)
         except Exception as e:
             logger.error(f"Error during schema comparison/sync: {e}", exc_info=True)
